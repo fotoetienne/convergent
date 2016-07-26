@@ -17,7 +17,7 @@
          type. Operation must be commutative, associative, and idempotent.
   view - Render the crdt into a standard clojure type
   apply-op - Apply an operation for op-based crdts. Default is join."
-  (join [a b])
+  (join [c c'])
   (view [c])
   (op [c o])
   (apply-op [c o]))
@@ -52,12 +52,12 @@
 
 ;;; GSet - Grow-Only Set
 
-(deftype GSet [values]
+(deftype GSet [s]
   CRDT
-  (join [a b]
-    (GSet. (union values (.values b))))
-  (view [c] values)
-  (apply-op [c op] (GSet. (conj values op))))
+  (join [c c']
+    (GSet. (union s (.-s c'))))
+  (view [c] s)
+  (apply-op [c op] (GSet. (conj s op))))
 
 (defmethod ->crdt :gset
   ([_] (GSet. #{}))
@@ -77,9 +77,9 @@
 
 (deftype PNSet [pos neg]
   CRDT
-  (join [a b]
-    (PNSet. (join pos (.pos b))
-           (join neg (.neg b))))
+  (join [c c']
+    (PNSet. (join pos (.-pos c'))
+           (join neg (.-neg c'))))
   (view [c] (difference (view pos) (view neg)))
   (apply-op [c [op e]]
     (case op
@@ -102,23 +102,25 @@
 
 (deftype GCounter [m]
   CRDT
-  (join [a b]
-    (->> (for [k (union (keys m) (keys (.m b)))
-               :let [v #(get (.m %) k 0)]]
-           [k (max (v a) (v b))])
+  (join [c c']
+    (->> (for [k (union (keys m) (keys (.-m c')))]
+           [k (max (get m k 0) (get (.-m c') k 0))])
       (into {})
       (GCounter.)))
-  (view [c] (reduce + (vals (.m c))))
+  (view [c] (reduce + (vals m)))
   (op [c [o node n]]
     (case o
       :set [node n]
       :inc [node (+ (get m node 0) n)]))
   (apply-op [c [node n]]
-    (join c {node n})))
+    (join c (GCounter. {node n}))))
 
 (defmethod ->crdt :gcounter
   ([_] (GCounter. {}))
   ([_ m] (GCounter. m)))
+
+;; Convenience functions
+(def gcounter (partial ->crdt :gcounter))
 
 (defn gcounter-set
   "Produce op to set counter for node to value n"
@@ -129,24 +131,31 @@
   ([c node] (op c [:inc node 1]))
   ([c node n] (op c [:inc node n])))
 
+#_
+(view (apply-op (gcounter {:a 1 :b 2}) [:a 1])) ; => 3
+#_
+(view (fold :gcounter [[:a 1] [:a 2] [:b 3] [:c 4] [:a 1]])) ; => 9
+
 
 (deftype PNCounter [pos neg]
   CRDT
-  (join [a b]
-    (PNCounter. (join pos (.pos b)) (join neg (.neg b))))
+  (join [c c']
+    (PNCounter. (join pos (.pos c')) (join neg (.neg c'))))
   (view [c] (- (view pos) (view neg)))
   (op [c [o node n]]
     (case o
-      :inc [node (+ (get pos node 0) n)]
-      :dec [node (+ (get neg node 0) n)]))
+      :inc [node :p (+ (get pos node 0) n)]
+      :dec [node :n (+ (get neg node 0) n)]))
   (apply-op [c [op & op']]
     (case op
-      :inc (PNCounter. (apply-op pos op') neg)
-      :dec (PNCounter. pos (apply-op neg op')))))
+      :p (PNCounter. (apply-op pos op') neg)
+      :n (PNCounter. pos (apply-op neg op')))))
 
 (defmethod ->crdt :pncounter
-  ([_] (->crdt :pncounter))
+  ([_] (PNCounter. (gcounter) (gcounter)))
   ([_ {:keys [p n]}] (PNCounter. (->crdt :gcounter p) (->crdt :gcounter n))))
+
+(def pncounter (partial ->crdt :pncounter))
 
 (defn pncounter-inc [c node n]
     ([c node] (pncounter-inc c node 1))
@@ -156,11 +165,15 @@
   ([c node] (pncounter-inc c node 1))
   ([c node n] [:dec node (->> c .n (get node 0) (+ n))]))
 
+
+#_
+(view (apply-op (pncounter) [:p :a 3]))
+
 #_
 (view
  (join
   (PNCounter.
-   (GCounter. {:a 1 :b 2})
+   (GCounter. {:a 1 :b 6})
    (GCounter. {:a 3 :b 1}))
   (PNCounter.
    (GCounter. {:a 0 :b 3})
