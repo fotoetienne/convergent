@@ -1,7 +1,8 @@
 (ns convergent.crdt
   (:require
    [clojure.set :refer [union difference]]
-   [clojure.core.match :refer [match]]
+   #?(:clj [clojure.core.match :refer [match]]
+      :cljs [cljs.core.match :refer-macros [match]])
    #?(:clj [clojure.core.reducers :as r])))
 
 
@@ -15,17 +16,21 @@
   join - Necessary to define a join-semilattice. Joins two crdts of the same
          type. Operation must be commutative, associative, and idempotent.
   view - Render the crdt into a standard clojure type
-  apply-op - Apply an operation for op-based crdts. Default implementation is
-             to join."
+  apply-op - Apply an operation for op-based crdts. Default is join."
   (join [a b])
   (view [c])
-  (apply-op [c op]))
+  (op [c o])
+  (apply-op [c o]))
 
-(extend Object CRDT {:join merge, :view identity, :apply-op join})
+;; Default crdt methods
+(extend-type #?(:clj Object :cljs js/Object)
+  CRDT
+  (op [c o] o)
+  (apply-op [c o] (join c o)))
 
 (defmulti ->crdt
   "Create a crdt type from edn representation"
-  (fn [t & xs] (keyword t)))
+  (fn [t & args] (keyword t)))
 
 
 ;;; Helper functions
@@ -45,6 +50,8 @@
 ;;; CRDT Types
 
 
+;;; GSet - Grow-Only Set
+
 (deftype GSet [values]
   CRDT
   (join [a b]
@@ -56,47 +63,60 @@
   ([_] (GSet. #{}))
   ([_ s] (GSet. s)))
 
+; Convenience functions
+(def gset (partial ->crdt :gset))
 (def gset-add
   "Creates an operation that will add an element to a gset"
   identity)
 
 #_
-(view (fold :gset [1 2 3 4 5 6]))
+(view (fold :gset [1 2 3 4 5 6])) ;=> #{1 4 6 3 2 5}
 
 
-(deftype PNSet [p n]
+;;; PNSet - Two Phase Set
+
+(deftype PNSet [pos neg]
   CRDT
   (join [a b]
-    (PNSet. (union p (.p b))
-           (union n (.n b))))
-  (view [c] (difference p n))
+    (PNSet. (join pos (.pos b))
+           (join neg (.neg b))))
+  (view [c] (difference (view pos) (view neg)))
   (apply-op [c [op e]]
     (case op
-      :add (PNSet. (conj p e) n)
-      :rem (PNSet. p (conj n e)))))
+      :add (PNSet. (apply-op pos e) neg)
+      :rem (PNSet. pos (apply-op neg e)))))
 
 (defmethod ->crdt :pnset
-  ([_] (->crdt :pnset #{} #{}))
-  ([_ {:keys [p n]}] (PNSet. (set p) (set n))))
+  ([_] (PNSet. (gset) (gset)))
+  ([_ {:keys [pos neg]}] (PNSet. (gset pos) (gset neg))))
 
+; Convenience functions
+(def pnset (partial ->crdt :pnset))
 (defn pnset-add [e] [:add e])
 (defn pnset-rem [e] [:rem e])
 
+#_
+(view (fold :pnset [[:add 1]  [:add 2] [:add 3] [:add 4] [:rem 4]])) ;=> #{1 2 3}
+
 
+
 (deftype GCounter [m]
   CRDT
   (join [a b]
-    (->> (for [k (union (keys (.m a)) (keys (.m b)))
+    (->> (for [k (union (keys m) (keys (.m b)))
                :let [v #(get (.m %) k 0)]]
            [k (max (v a) (v b))])
       (into {})
       (GCounter.)))
   (view [c] (reduce + (vals (.m c))))
+  (op [c [o node n]]
+    (case o
+      :set [node n]
+      :inc [node (+ (get m node 0) n)]))
   (apply-op [c [node n]]
-    (join c )
-    ))
+    (join c {node n})))
 
-(defmethod ->crdt :pnset
+(defmethod ->crdt :gcounter
   ([_] (GCounter. {}))
   ([_ m] (GCounter. m)))
 
@@ -106,23 +126,35 @@
 
 (defn gcounter-inc
   "Produce op to increment counter value for local node"
-  ([c node] (gcounter-inc c node 1))
-  ([c node n] [node (->> c .m (get node 0) (+ n))]))
+  ([c node] (op c [:inc node 1]))
+  ([c node n] (op c [:inc node n])))
 
 
-(deftype PNCounter [p n]
+(deftype PNCounter [pos neg]
   CRDT
   (join [a b]
-    (PNCounter. (join p (.p b)) (join n (.n b))))
-  (view [c] (- (view p) (view n)))
+    (PNCounter. (join pos (.pos b)) (join neg (.neg b))))
+  (view [c] (- (view pos) (view neg)))
+  (op [c [o node n]]
+    (case o
+      :inc [node (+ (get pos node 0) n)]
+      :dec [node (+ (get neg node 0) n)]))
   (apply-op [c [op & op']]
     (case op
-      :inc (PNCounter. (apply-op p op') n)
-      :dec (PNCounter. p (apply-op n op')))))
+      :inc (PNCounter. (apply-op pos op') neg)
+      :dec (PNCounter. pos (apply-op neg op')))))
 
 (defmethod ->crdt :pncounter
   ([_] (->crdt :pncounter))
   ([_ {:keys [p n]}] (PNCounter. (->crdt :gcounter p) (->crdt :gcounter n))))
+
+(defn pncounter-inc [c node n]
+    ([c node] (pncounter-inc c node 1))
+    ([c node n] [:inc node (->> c .p (get node 0) (+ n))]))
+
+(defn pncounter-dec [c node n]
+  ([c node] (pncounter-inc c node 1))
+  ([c node n] [:dec node (->> c .n (get node 0) (+ n))]))
 
 #_
 (view
@@ -134,109 +166,105 @@
    (GCounter. {:a 0 :b 3})
    (GCounter. {:b 1}))))
 
-(deftype LwwElem [time value]
+(deftype LwwRegister [time value]
   CRDT
-  (join [a b]
-    (if (> (.time a) (.time b))
-      a
-      b))
-  (view [c] (.value c)))
+  (join [c c'] (if (> time (.time c')) c c'))
+  (view [c] value)
+  (apply-op [c [t v]]
+    (join c (LwwRegister. t v))))
 
-(defmethod ->crdt :lww-elem
-  ([_] (LwwElem. 0 0))
-  ([_ {:keys [time value]}] (LwwElem. time value)))
+(defmethod ->crdt :lww-register
+  ([_] (LwwRegister. 0 0))
+  ([_ {:keys [time value]}] (LwwRegister. time value)))
 
-(view (->crdt :lww-elem {:time 0 :value 0}))
+(defn lww-register-set [time value] [time value])
 
-(def a (->crdt :lww-elem))
-(def ops [{:time 3 :value 1} {:time 4 :value 1}])
-
-(defn apply-ops [ops] (reduce join ops))
-
-(->> ops
-  (map (partial ->crdt :lww-elem))
-  (reduce join)
-  view)
-
-(defrecord Element [^Boolean add      ;; Operation: true = add, false = remove
-                    ^Long timestamp]) ;; Epoch time (ms) of most recent update
-
-(deftype LwwElementSet [s]
-  CRDT
-  (join [a b]
-    (for [k (union (keys (.s a)) (keys (.s b)))
-          :let [[x y] (map #(-> % .values (get k)) [a b])]]
-      [k (match [x y]
-           [nil nil] nil
-           [nil _] y
-           [_ nil] x
-           :else (join x y))]))
-  (view [c] (.value c)))
 #_
-(defmethod ->crdt :lww-element-set
-  ([_] (LwwElementSet. {}))
-  ([_ s] (LwwElementSet.
-          (reduce-kv
-           (fn [coll k v]
+(view (fold :lww-register [[2 :2] [4 :4] [1 :1]])) ;; => :4
 
-             ) s)
-          )))
+
+;;; Unfinished
+;; (defrecord Element [^Boolean add      ;; Operation: true = add, false = remove
+;;                     ^Long timestamp]) ;; Epoch time (ms) of most recent update
 
-(def reservation-schema
-  {:name "reservation"
-   :type :record
-   :fields [{:name :id, :type :string, :logicaltype :lww-elem, :required true}
-            {:name :rid, :type :int, :logicaltype :lww-elem, :required true}
-            {:name :partysize, :type :int, :logicaltype :lww-elem, :required true}
-            ;; {:name "scheduled", :type :long, :logicaltype :timestamp-millis, :required true}
-            ;; {:name "state", :type :, :logicaltype :timestamp-millis, :required true}
-            {:name :diner-name, :type :string, :logicaltype :lww-elem, :required true}
-            ]
-   })
+;; (deftype LwwElementSet [s]
+;;   CRDT
+;;   (join [a b]
+;;     (for [k (union (keys (.s a)) (keys (.s b)))
+;;           :let [[x y] (map #(-> % .values (get k)) [a b])]]
+;;       [k (match [x y]
+;;            [nil nil] nil
+;;            [nil _] y
+;;            [_ nil] x
+;;            :else (join x y))]))
+;;   (view [c] (.value c)))
+;; #_
+;; (defmethod ->crdt :lww-element-set
+;;   ([_] (LwwElementSet. {}))
+;;   ([_ s] (LwwElementSet.
+;;           (reduce-kv
+;;            (fn [coll k v]
 
-(deftype cRecord [schema values]
-  CRDT
-  (join [a b]
-    (->>
-        (for [{:keys [name logicaltype]} (:fields schema)
-              :let [[x y] (map #(-> % .values (get name)) [a b])]]
-          [name (match [x y]
-                  [nil nil] nil
-                  [nil _] y
-                  [_ nil] x
-                  :else (join x y))])
-      (into {})
-      (cRecord. schema)))
-  (view [c]
-    (->> (for [{:keys [name logicaltype]} (:fields schema)]
-           [name (some-> c .values (get name) view)])
-      (into {}))))
+;;              ) s)
+;;           )))
 
-(defmethod ->crdt :crecord
-  ([_ schema] (cRecord. schema {}))
-  ([_ schema values]
-   (->> (for [{:keys [name logicaltype]} (:fields schema)]
-          [name (some->> name (get values) (->crdt logicaltype))])
-     (filter #(-> % second some?))
-     (into {})
-     (cRecord. schema))))
+;; (def reservation-schema
+;;   {:name "reservation"
+;;    :type :record
+;;    :fields [{:name :id, :type :string, :logicaltype :lww-register, :required true}
+;;             {:name :rid, :type :int, :logicaltype :lww-register, :required true}
+;;             {:name :partysize, :type :int, :logicaltype :lww-register, :required true}
+;;             ;; {:name "scheduled", :type :long, :logicaltype :timestamp-millis, :required true}
+;;             ;; {:name "state", :type :, :logicaltype :timestamp-millis, :required true}
+;;             {:name :diner-name, :type :string, :logicaltype :lww-register, :required true}
+;;             ]
+;;    })
 
-(def a (->crdt :crecord reservation-schema
-              {:id {:value 5 :time 1}}))
-(def b (->crdt :crecord reservation-schema
-               {:rid {:value 123 :time 2}}))
-(view (join a b))
+;; (deftype cRecord [schema values]
+;;   CRDT
+;;   (join [a b]
+;;     (->>
+;;         (for [{:keys [name logicaltype]} (:fields schema)
+;;               :let [[x y] (map #(-> % .values (get name)) [a b])]]
+;;           [name (match [x y]
+;;                   [nil nil] nil
+;;                   [nil _] y
+;;                   [_ nil] x
+;;                   :else (join x y))])
+;;       (into {})
+;;       (cRecord. schema)))
+;;   (view [c]
+;;     (->> (for [{:keys [name logicaltype]} (:fields schema)]
+;;            [name (some-> c .values (get name) view)])
+;;       (into {}))))
 
-(def ops
-  [
-   {:entry 0
-    :value {:id 1
-            :rid 1
-            :partysize 6}
-    :time 1}
-   {:entry 0
-    :value {:id 1
-            :rid 1
-            :partysize 6}
-    :time 1}
-   ])
+;; (defmethod ->crdt :crecord
+;;   ([_ schema] (cRecord. schema {}))
+;;   ([_ schema values]
+;;    (->> (for [{:keys [name logicaltype]} (:fields schema)]
+;;           [name (some->> name (get values) (->crdt logicaltype))])
+;;      (filter #(-> % second some?))
+;;      (into {})
+;;      (cRecord. schema))))
+
+;; (def a (->crdt :crecord reservation-schema
+;;               {:id {:value 5 :time 1}}))
+
+;; (def b (->crdt :crecord reservation-schema
+;;                {:rid {:value 123 :time 2}}))
+
+;; (view (join a b))
+
+;; (def ops
+;;   [
+;;    {:entry 0
+;;     :value {:id 1
+;;             :rid 1
+;;             :partysize 6}
+;;     :time 1}
+;;    {:entry 0
+;;     :value {:id 1
+;;             :rid 1
+;;             :partysize 6}
+;;     :time 1}
+;;    ])
