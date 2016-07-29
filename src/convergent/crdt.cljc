@@ -1,8 +1,9 @@
 (ns convergent.crdt
   (:require
    [clojure.set :refer [union difference]]
-   #?(:clj [clojure.core.match :refer [match]]
-      :cljs [cljs.core.match :refer-macros [match]])
+   [convergent.util :refer [vmap]]
+   ;; #?(:clj [clojure.core.match :refer [match]]
+   ;;    :cljs [cljs.core.match :refer-macros [match]])
    #?(:clj [clojure.core.reducers :as r])))
 
 
@@ -16,6 +17,7 @@
   join - Necessary to define a join-semilattice. Joins two crdts of the same
          type. Operation must be commutative, associative, and idempotent.
   view - Render the crdt into a standard clojure type
+  op - Create an operation to be applied later.
   apply-op - Apply an operation for op-based crdts. Default is join."
   (join [c c'])
   (view [c])
@@ -25,6 +27,8 @@
 ;; Default crdt methods
 (extend-type #?(:clj Object :cljs js/Object)
   CRDT
+  (join [c c'] (max c c'))
+  (view [c] c)
   (op [c o] o)
   (apply-op [c o] (join c o)))
 
@@ -37,14 +41,14 @@
 
 (defn monoid
   "Forms a monoid of given crdt type for use with reducers"
-  [type]
-  #?(:clj (r/monoid join (constantly (->crdt type)))))
+  [crdt-type]
+  #?(:clj (r/monoid join (constantly (->crdt crdt-type)))))
 
 (defn fold
   "Applies a series of crdt operations in parallel"
-  [type coll]
-  #?(:clj (r/fold (monoid type) apply-op coll)
-     :cljs (reduce apply-op (->crdt type) coll)))
+  [crdt-type coll]
+  #?(:clj (r/fold (monoid crdt-type) apply-op coll)
+     :cljs (reduce apply-op (->crdt crdt-type) coll)))
 
 
 ;;; CRDT Types
@@ -61,7 +65,7 @@
 
 (defmethod ->crdt :gset
   ([_] (GSet. #{}))
-  ([_ s] (GSet. s)))
+  ([_ s] (GSet. (set s))))
 
 ; Convenience functions
 (def gset (partial ->crdt :gset))
@@ -102,11 +106,7 @@
 
 (deftype GCounter [m]
   CRDT
-  (join [c c']
-    (->> (for [k (union (keys m) (keys (.-m c')))]
-           [k (max (get m k 0) (get (.-m c') k 0))])
-      (into {})
-      (GCounter.)))
+  (join [c c'] (GCounter. (merge-with join m (.-m c'))))
   (view [c] (reduce + (vals m)))
   (op [c [o node n]]
     (case o
@@ -140,7 +140,7 @@
 (deftype PNCounter [pos neg]
   CRDT
   (join [c c']
-    (PNCounter. (join pos (.pos c')) (join neg (.neg c'))))
+    (PNCounter. (join pos (.-pos c')) (join neg (.-neg c'))))
   (view [c] (- (view pos) (view neg)))
   (op [c [o node n]]
     (case o
@@ -153,35 +153,26 @@
 
 (defmethod ->crdt :pncounter
   ([_] (PNCounter. (gcounter) (gcounter)))
-  ([_ {:keys [p n]}] (PNCounter. (->crdt :gcounter p) (->crdt :gcounter n))))
+  ([_ {:keys [p n]}] (PNCounter. (gcounter p) (gcounter n))))
 
+;; Convenience functions
 (def pncounter (partial ->crdt :pncounter))
 
-(defn pncounter-inc [c node n]
-    ([c node] (pncounter-inc c node 1))
-    ([c node n] [:inc node (->> c .p (get node 0) (+ n))]))
-
-(defn pncounter-dec [c node n]
+(defn pncounter-inc
   ([c node] (pncounter-inc c node 1))
-  ([c node n] [:dec node (->> c .n (get node 0) (+ n))]))
+  ([c node n] (op c [:inc node n])))
 
+(defn pncounter-dec
+  ([c node] (pncounter-dec c node 1))
+  ([c node n] (op c [:dec node n])))
 
 #_
-(view (apply-op (pncounter) [:p :a 3]))
+(view (apply-op (pncounter {:p {:a 2}}) [:p :a 3])) ; => 3
 
-#_
-(view
- (join
-  (PNCounter.
-   (GCounter. {:a 1 :b 6})
-   (GCounter. {:a 3 :b 1}))
-  (PNCounter.
-   (GCounter. {:a 0 :b 3})
-   (GCounter. {:b 1}))))
-
+
 (deftype LwwRegister [time value]
   CRDT
-  (join [c c'] (if (> time (.time c')) c c'))
+  (join [c c'] (if (> time (.-time c')) c c'))
   (view [c] value)
   (apply-op [c [t v]]
     (join c (LwwRegister. t v))))
@@ -190,36 +181,71 @@
   ([_] (LwwRegister. 0 0))
   ([_ {:keys [time value]}] (LwwRegister. time value)))
 
+;; Convenience functions
+(def lww-register (partial ->crdt :lww-register))
 (defn lww-register-set [time value] [time value])
 
 #_
 (view (fold :lww-register [[2 :2] [4 :4] [1 :1]])) ;; => :4
 
 
+;; Const
+; Constant type.
+
+(deftype Const [v]
+  CRDT
+  (join [c c'] (Const. (or v (.-v c'))))
+  (view [c] v)
+  (apply-op [c op] (join c (Const. op))))
+
+(defmethod ->crdt :const
+  ([_] (Const. nil))
+  ([_ v] (Const. v)))
+
+(def const (partial ->crdt :const))
+
+#_
+(view (fold :const [nil 1 2 3])) ; => 1
+
+
+;; GMap - Grow-only map
+
+(deftype GMap [m]
+  CRDT
+  (join [c c'] (GSet. (merge-with join m (.-m c'))))
+  (view [c] (vmap view m))
+  (apply-op [c [k v]] (join c (GMap. {k v}))))
+
+(defmethod ->crdt :gmap
+  ([_] (GMap. {}))
+  ([_ type m] (GMap. (vmap (partial ->crdt type) m))))
+
+(def gmap (partial ->crdt :gmap))
+
+(defn gmap-assoc [c k v]
+  (op :gmap [k v]))
+
+
+;; LwwElementSet
+
+(deftype LwwElementSet [m]
+  CRDT
+  (join [c c'] (LwwElementSet. (join m (.-m c'))))
+  (view [c] (into {} (filter (fn [k v] (view v)) m)))
+  (apply-op [c [k t v]] (join c (LwwElementSet. {k (LwwRegister. t v)}))))
+
+(defmethod ->crdt :lww-element-set
+  ([_] (LwwElementSet. {}))
+  ([_ m] (LwwElementSet. (vmap (partial ->crdt type) m))))
+
+(def lww-element-set (partial ->crdt :lww-element-set))
+
+;; TODO: LWWElementSet ORSet ORMap OURSet OURMap
+
 ;;; Unfinished
 ;; (defrecord Element [^Boolean add      ;; Operation: true = add, false = remove
 ;;                     ^Long timestamp]) ;; Epoch time (ms) of most recent update
 
-;; (deftype LwwElementSet [s]
-;;   CRDT
-;;   (join [a b]
-;;     (for [k (union (keys (.s a)) (keys (.s b)))
-;;           :let [[x y] (map #(-> % .values (get k)) [a b])]]
-;;       [k (match [x y]
-;;            [nil nil] nil
-;;            [nil _] y
-;;            [_ nil] x
-;;            :else (join x y))]))
-;;   (view [c] (.value c)))
-;; #_
-;; (defmethod ->crdt :lww-element-set
-;;   ([_] (LwwElementSet. {}))
-;;   ([_ s] (LwwElementSet.
-;;           (reduce-kv
-;;            (fn [coll k v]
-
-;;              ) s)
-;;           )))
 
 ;; (def reservation-schema
 ;;   {:name "reservation"

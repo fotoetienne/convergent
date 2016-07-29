@@ -3,6 +3,32 @@
             #?(:clj  [clojure.test :refer :all]
                :cljs [cljs.test :refer-macros [deftest testing is]])))
 
+;; TODO add generative tests for commutativity and idempotence
+
+(defn commutative-join [xs]
+  (= (reduce c/join xs)
+     (reduce c/join (shuffle xs))))
+
+(defn idempotent-join [xs]
+  (= (reduce c/join xs)
+     (reduce c/join (concat xs xs))))
+
+(defn associative-join [xs]
+  (= (reduce c/join xs)
+     (reduce c/join (map c/join (partition 2 xs)))))
+
+(defn commutative-ops [crdt ops]
+  (= (c/fold crdt ops)
+     (c/fold crdt (shuffle ops))))
+
+(defn idempotent-ops [crdt ops]
+  (= (c/fold crdt ops)
+     (c/fold crdt (concat ops ops))))
+
+(defn associative-ops [crdt ops]
+  (= (c/fold crdt ops)
+     (reduce c/join (map (partial c/fold crdt) (partition-all 5 ops)))))
+
 (deftest gset-test
   (testing "fold over gset"
     (is (= #{1 2 3 4 5 6}
@@ -26,4 +52,6 @@
             (c/fold :pncounter
                     [[:p :a 1] [:p :a 2] [:p :b 3] [:p :c 4] [:n :a 1]]))))))
 
-;; TODO add generative tests for commutativity and idempotence
+(deftest lww-register-test
+  (testing "fold over lww-register ops"
+    (is (= :4 (c/view (c/fold :lww-register [[2 :2] [4 :4] [1 :1]]))))))
