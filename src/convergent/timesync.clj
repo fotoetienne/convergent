@@ -43,9 +43,7 @@
   . by default: [8y 194d 12d 18h 4m 16s 1s]
   "
   (:require
-   [clojure.string :as s]
-   [crdt.core.timestamp :refer [timestamp-millis]])
-  (:import [crdt.core Timestamp]))
+   [clojure.string :as s]))
 
 ;; Some helper Functions
 
@@ -53,7 +51,7 @@
 
 (defn hash-cat [& hs] (mod (apply + hs) (Integer/MAX_VALUE)))
 
-(defn hulc->ts [^Timestamp hulc] (-> hulc timestamp-millis (quot 1000)))
+(defn hulc->ts [hulc] (-> hulc  (quot 1000)))
 
 (defn hex->int [^String s] (Integer/parseInt s 16))
 
