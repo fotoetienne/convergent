@@ -1,12 +1,12 @@
-(ns crdt.core.timesync
+(ns convergent.timesync
   "Syncs two sets of timestamped events
   . useful for anti-entropy of eventually consistent logs
-  . employs a pruned hash trie of HULC timestamps
+  . employs a pruned hash trie of timestamps
   . minimizes resending already synchronized events
 
   # Problem #
   Suppose we have two nodes, α and β.
-  . α and β each have a list of HULC timestamped events, A and B
+  . α and β each have a list of timestamped events, A and B
   . α and β wish to synchronize such that they both have A ∪ B
   . a simple method would be for α to send its complete list of events to β
   . unfortunately
@@ -43,49 +43,47 @@
   . by default: [8y 194d 12d 18h 4m 16s 1s]
   "
   (:require
+   #?(:clj  [clojure.pprint :refer [cl-format]]
+      :cljs [cljs.pprint    :refer [cl-format]])
    [clojure.string :as s]))
 
 ;; Some helper Functions
 
 (def hash-fn hash)
 
-(defn hash-cat [& hs] (mod (apply + hs) (Integer/MAX_VALUE)))
+(defn hash-cat [& hs] (mod (apply + hs) 2147483647))
 
-(defn hulc->ts [hulc] (-> hulc  (quot 1000)))
+(defn hex->int [^String s] (#?(:clj Integer/parseInt, :cljs js/parseInt) s 16))
 
-(defn hex->int [^String s] (Integer/parseInt s 16))
+(defn zero-fill [t] (cl-format nil "~8,1,0,'0a" t))
 
-(defn zero-fill [t] (-> (format "%-8s" t) (s/replace \space \0)))
-
-(def hexify (partial format "%08x"))
+(defn hexify [n] (cl-format nil "~8,'0x" n))
 
 (def unhexify (comp hex->int zero-fill))
-
-(def hex-keys (for [x (range 16)] (-> x hexify last)))
 
 (defn key-union "union of keys from a seq of maps" [xs]
   (->> xs (apply merge) keys (filter char?) sort))
 
-;; bucket size can be tuned by modifying hulc->keys and keys->ts
+;; Bucket size can be tuned by providing a different key-fn
 ;; . hex-sec [8y 194d 12d 18h 4m 16s 1s]
 ;; . hex-ms [35y 2y 50d 3d 5h 17m 65s 4s 256ms 16ms 1ms]
 ;; . dec-ms [32y 3y 116d 12d 1d 3h 17m 2m 10s 1s 100ms 10ms 1ms]
 ;; . octal-ms [17y 2y 100d 12d 38h 5h 35m 4m 32s 4s 512ms 64ms 8ms 1ms]
 ;; . base4-ms [... 50d 12d 3d 19h 5h 1h 17m 4m 1m 16s 4s 1s 256ms 64ms 16ms 4ms 1ms]
 
-(defn hulc->keys "Gets the trie-keys for a hulc based on its hex timestamp" [x]
-  (-> x hulc->ts hexify (concat [x])))
+(defn hex-keys "Gets the trie-keys for a millisecond timestamp" [x]
+  (-> x hexify (concat [x])))
 
 (defn keys->ts "Get ms timestamp from trie-keys" [ks]
-  (some-> ks not-empty s/join unhexify (* 1000)))
+  (some-> ks not-empty s/join unhexify))
 
 ;; Trie Building
 
 (defn trie-insert
-  "Insert a hulc value x into a hash trie"
-  [trie x]
+  "Insert a timestamp x into a hash trie"
+  [key-fn trie x]
   (let [h (hash-fn x)
-        ks (hulc->keys x)
+        ks (key-fn x)
         e {:hash h}]
     (loop [t trie, i 0]
       (let [[k r] (split-at i ks)]
@@ -97,8 +95,8 @@
 
 (defn trie-build
   "Build a hash trie from a list of elements"
-  [s]
-  (reduce trie-insert {} s))
+  [key-fn s]
+  (reduce (partial trie-insert key-fn) {} s))
 
 ;; Trie Diffing
 

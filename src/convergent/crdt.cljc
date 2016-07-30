@@ -2,8 +2,6 @@
   (:require
    [clojure.set :refer [union difference]]
    [convergent.util :refer [vmap]]
-   ;; #?(:clj [clojure.core.match :refer [match]]
-   ;;    :cljs [cljs.core.match :refer-macros [match]])
    #?(:clj [clojure.core.reducers :as r])))
 
 
