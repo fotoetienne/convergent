@@ -10,8 +10,8 @@
   :dependencies [[org.clojure/core.match "0.3.0-alpha4"]]
 
   :profiles
-  {:dev {:dependencies [[org.clojure/clojure "1.9.0-alpha10"]
-                        [org.clojure/clojurescript "1.9.89"]
+  {:dev {:dependencies [[org.clojure/clojure "1.9.0-alpha11"]
+                        [org.clojure/clojurescript "1.9.227"]
                         [org.clojure/test.check "0.9.0"]
                         [org.mozilla/rhino "1.7.7.1"]]
          :plugins [[lein-cljsbuild "1.1.3"]
