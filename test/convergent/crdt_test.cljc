@@ -42,7 +42,7 @@
 (deftest gcounter-test
   (testing "fold over gcounter ops"
     (is (= 3 (c/view (c/gcounter {:a 1 :b 2}))))
-    (is (= 2 (c/view (c/apply-op (c/gcounter {:a 1}) [:a 2]))))
+    (is (= 2 (c/view (c/effect (c/gcounter {:a 1}) [:a 2]))))
     (is (= 9 (c/view (c/fold :gcounter [[:a 1] [:a 2] [:b 3] [:c 4] [:a 1]]))))))
 
 (deftest pncounter-test

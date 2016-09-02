@@ -14,21 +14,33 @@
 
   join - Necessary to define a join-semilattice. Joins two crdts of the same
          type. Operation must be commutative, associative, and idempotent.
-  view - Render the crdt into a standard clojure type
-  op - Create an operation to be applied later.
-  apply-op - Apply an operation for op-based crdts. Default is join."
+  view - Render the crdt into a standard clojure type"
   (join [c c'])
-  (view [c])
-  (op [c o])
-  (apply-op [c o]))
+  (view [c]))
+
+(defprotocol Operational
+  "Operation based CRDT
+
+  prepare - Create an operation to be applied later.
+  effect - Apply an operation for op-based crdts. Default is join."
+  (prepare [c o])
+  (effect [c o]))
+
+(defprotocol Serializable
+  "State can be output as pure edn
+  This edn should result in an identical object when passed to ->crdt
+  with appropriate type tag."
+  (marshall [c]))
 
 ;; Default crdt methods
 (extend-type #?(:clj Object :cljs js/Object)
   CRDT
   (join [c c'] (max c c'))
   (view [c] c)
-  (op [c o] o)
-  (apply-op [c o] (join c o)))
+  Operational
+  (prepare [c o] o)
+  (effect [c o] (join c o))
+  Serializable)
 
 (defmulti ->crdt
   "Create a crdt type from edn representation"
@@ -45,8 +57,8 @@
 (defn fold
   "Applies a series of crdt operations in parallel"
   [crdt-type coll]
-  #?(:clj (r/fold (monoid crdt-type) apply-op coll)
-     :cljs (reduce apply-op (->crdt crdt-type) coll)))
+  #?(:clj (r/fold (monoid crdt-type) effect coll)
+     :cljs (reduce effect (->crdt crdt-type) coll)))
 
 
 ;;; CRDT Types
@@ -56,10 +68,10 @@
 
 (deftype GSet [s]
   CRDT
-  (join [c c']
-    (GSet. (union s (.-s c'))))
+  (join [c c'] (GSet. (union s (.-s c'))))
   (view [c] s)
-  (apply-op [c op] (GSet. (conj s op))))
+  Operational
+  (effect [c op] (GSet. (conj s op))))
 
 (defmethod ->crdt :gset
   ([_] (GSet. #{}))
@@ -83,10 +95,11 @@
     (PNSet. (join pos (.-pos c'))
            (join neg (.-neg c'))))
   (view [c] (difference (view pos) (view neg)))
-  (apply-op [c [op e]]
+  Operational
+  (effect [c [op e]]
     (case op
-      :add (PNSet. (apply-op pos e) neg)
-      :rem (PNSet. pos (apply-op neg e)))))
+      :add (PNSet. (effect pos e) neg)
+      :rem (PNSet. pos (effect neg e)))))
 
 (defmethod ->crdt :pnset
   ([_] (PNSet. (gset) (gset)))
@@ -106,11 +119,12 @@
   CRDT
   (join [c c'] (GCounter. (merge-with join m (.-m c'))))
   (view [c] (reduce + (vals m)))
-  (op [c [o node n]]
+  Operational
+  (prepare [c [o node n]]
     (case o
       :set [node n]
       :inc [node (+ (get m node 0) n)]))
-  (apply-op [c [node n]]
+  (effect [c [node n]]
     (join c (GCounter. {node n}))))
 
 (defmethod ->crdt :gcounter
@@ -126,11 +140,11 @@
 
 (defn gcounter-inc
   "Produce op to increment counter value for local node"
-  ([c node] (op c [:inc node 1]))
-  ([c node n] (op c [:inc node n])))
+  ([c node] (prepare c [:inc node 1]))
+  ([c node n] (prepare c [:inc node n])))
 
 #_
-(view (apply-op (gcounter {:a 1 :b 2}) [:a 1])) ; => 3
+(view (effect (gcounter {:a 1 :b 2}) [:a 1])) ; => 3
 #_
 (view (fold :gcounter [[:a 1] [:a 2] [:b 3] [:c 4] [:a 1]])) ; => 9
 
@@ -140,14 +154,15 @@
   (join [c c']
     (PNCounter. (join pos (.-pos c')) (join neg (.-neg c'))))
   (view [c] (- (view pos) (view neg)))
-  (op [c [o node n]]
+  Operational
+  (prepare [c [o node n]]
     (case o
       :inc [node :p (+ (get pos node 0) n)]
       :dec [node :n (+ (get neg node 0) n)]))
-  (apply-op [c [op & op']]
+  (effect [c [op & op']]
     (case op
-      :p (PNCounter. (apply-op pos op') neg)
-      :n (PNCounter. pos (apply-op neg op')))))
+      :p (PNCounter. (effect pos op') neg)
+      :n (PNCounter. pos (effect neg op')))))
 
 (defmethod ->crdt :pncounter
   ([_] (PNCounter. (gcounter) (gcounter)))
@@ -158,21 +173,22 @@
 
 (defn pncounter-inc
   ([c node] (pncounter-inc c node 1))
-  ([c node n] (op c [:inc node n])))
+  ([c node n] (prepare c [:inc node n])))
 
 (defn pncounter-dec
   ([c node] (pncounter-dec c node 1))
-  ([c node n] (op c [:dec node n])))
+  ([c node n] (prepare c [:dec node n])))
 
 #_
-(view (apply-op (pncounter {:p {:a 2}}) [:p :a 3])) ; => 3
+(view (effect (pncounter {:p {:a 2}}) [:p :a 3])) ; => 3
 
 
 (deftype LwwRegister [time value]
   CRDT
   (join [c c'] (if (> time (.-time c')) c c'))
   (view [c] value)
-  (apply-op [c [t v]]
+  Operational
+  (effect [c [t v]]
     (join c (LwwRegister. t v))))
 
 (defmethod ->crdt :lww-register
@@ -194,7 +210,8 @@
   CRDT
   (join [c c'] (Const. (or v (.-v c'))))
   (view [c] v)
-  (apply-op [c op] (join c (Const. op))))
+  Operational
+  (effect [c op] (join c (Const. op))))
 
 (defmethod ->crdt :const
   ([_] (Const. nil))
@@ -212,7 +229,8 @@
   CRDT
   (join [c c'] (GSet. (merge-with join m (.-m c'))))
   (view [c] (vmap view m))
-  (apply-op [c [k v]] (join c (GMap. {k v}))))
+  Operational
+  (effect [c [k v]] (join c (GMap. {k v}))))
 
 (defmethod ->crdt :gmap
   ([_] (GMap. {}))
@@ -221,7 +239,7 @@
 (def gmap (partial ->crdt :gmap))
 
 (defn gmap-assoc [c k v]
-  (op :gmap [k v]))
+  (prepare :gmap [k v]))
 
 
 ;; LwwElementSet
@@ -230,7 +248,8 @@
   CRDT
   (join [c c'] (LwwElementSet. (join m (.-m c'))))
   (view [c] (into {} (filter (fn [k v] (view v)) m)))
-  (apply-op [c [k t v]] (join c (LwwElementSet. {k (LwwRegister. t v)}))))
+  Operational
+  (effect [c [k t v]] (join c (LwwElementSet. {k (LwwRegister. t v)}))))
 
 (defmethod ->crdt :lww-element-set
   ([_] (LwwElementSet. {}))
