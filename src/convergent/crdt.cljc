@@ -30,17 +30,8 @@
   "State can be output as pure edn
   This edn should result in an identical object when passed to ->crdt
   with appropriate type tag."
-  (marshall [c]))
-
-;; Default crdt methods
-(extend-type #?(:clj Object :cljs js/Object)
-  CRDT
-  (join [c c'] (max c c'))
-  (view [c] c)
-  Operational
-  (prepare [c o] o)
-  (effect [c o] (join c o))
-  Serializable)
+  (crdt-type [c])
+  (marshal [c]))
 
 (defmulti ->crdt
   "Create a crdt type from edn representation"
@@ -61,17 +52,21 @@
      :cljs (reduce effect (->crdt crdt-type) coll)))
 
 
-;;; CRDT Types
+;;; # CRDT Types #
 
 
 ;;; GSet - Grow-Only Set
 
 (deftype GSet [s]
   Convergent
-  (join [c c'] (GSet. (union s (.-s c'))))
-  (view [c] s)
+  (join [_ c'] (GSet. (union s (.-s c'))))
+  (view [_] s)
   Operational
-  (effect [c op] (GSet. (conj s op))))
+  (prepare [c o] o)
+  (effect [_ op] (GSet. (conj s op)))
+  Serializable
+  (crdt-type [_] :gset)
+  (marshal [_] (vec s)))
 
 (defmethod ->crdt :gset
   ([_] (GSet. #{}))
@@ -96,14 +91,18 @@
            (join neg (.-neg c'))))
   (view [c] (difference (view pos) (view neg)))
   Operational
+  (prepare [c o] o)
   (effect [c [op e]]
     (case op
       :add (PNSet. (effect pos e) neg)
-      :rem (PNSet. pos (effect neg e)))))
+      :rem (PNSet. pos (effect neg e))))
+  Serializable
+  (crdt-type [c] :pnset)
+  (marshal [c] [(marshal pos) (marshal neg)]))
 
 (defmethod ->crdt :pnset
   ([_] (PNSet. (gset) (gset)))
-  ([_ {:keys [pos neg]}] (PNSet. (gset pos) (gset neg))))
+  ([_ [pos neg]] (PNSet. (gset pos) (gset neg))))
 
 ; Convenience functions
 (def pnset (partial ->crdt :pnset))
@@ -125,7 +124,10 @@
       :set [node n]
       :inc [node (+ (get m node 0) n)]))
   (effect [c [node n]]
-    (join c (GCounter. {node n}))))
+    (join c (GCounter. {node n})))
+  Serializable
+  (crdt-type [_] :gcounter)
+  (marshal [_] m))
 
 (defmethod ->crdt :gcounter
   ([_] (GCounter. {}))
@@ -185,11 +187,16 @@
 
 (deftype LwwRegister [time value]
   Convergent
-  (join [c c'] (if (> time (.-time c')) c c'))
+  (join [c c']
+    (let [x (compare [time value] [(.-time c') (.-value c')])]
+      (if (>= x 0) c c')))
   (view [c] value)
   Operational
+  (prepare [c o] o)
   (effect [c [t v]]
-    (join c (LwwRegister. t v))))
+    (join c (LwwRegister. t v)))
+  Serializable
+  (marshal [c] {:time time :value value}))
 
 (defmethod ->crdt :lww-register
   ([_] (LwwRegister. 0 0))
@@ -200,7 +207,7 @@
 (defn lww-register-set [time value] [time value])
 
 #_
-(view (fold :lww-register [[2 :2] [4 :4] [1 :1]])) ;; => :4
+(view (fold :lww-register [[2 :2] [4 :4] [1 :1] [5 :5] [5 :1]])) ;; => :5
 
 
 ;; Const
@@ -211,7 +218,11 @@
   (join [c c'] (Const. (or v (.-v c'))))
   (view [c] v)
   Operational
-  (effect [c op] (join c (Const. op))))
+  (prepare [c o] o)
+  (effect [c op] (join c (Const. op)))
+  Serializable
+  (crdt-type [_] :const)
+  (marshal [_] v))
 
 (defmethod ->crdt :const
   ([_] (Const. nil))
@@ -227,14 +238,17 @@
 
 (deftype GMap [m]
   Convergent
-  (join [c c'] (GSet. (merge-with join m (.-m c'))))
-  (view [c] (vmap view m))
+  (join [c c'] (GMap. (merge-with join m (.-m c'))))
+  (view [c] (map-v view m))
   Operational
-  (effect [c [k v]] (join c (GMap. {k v}))))
+  (prepare [c o] o)
+  ;; (effect [c [k v]] (join c (GMap. {k v})))
+  (effect [c [k v]]
+    (join c (GMap. {k (if (get c k) (effect c v) v)}))))
 
 (defmethod ->crdt :gmap
   ([_] (GMap. {}))
-  ([_ type m] (GMap. (vmap (partial ->crdt type) m))))
+  ([_ type m] (GMap. (map-v (partial ->crdt type) m))))
 
 (def gmap (partial ->crdt :gmap))
 
@@ -246,81 +260,146 @@
 
 (deftype LwwElementSet [m]
   Convergent
-  (join [c c'] (LwwElementSet. (join m (.-m c'))))
-  (view [c] (into {} (filter (fn [k v] (view v)) m)))
+  (join [c c'] (LwwElementSet. (merge-with join m (.-m c'))))
+  (view [c] (->> m
+              (filter (fn [[k v]] (not= :rem (view v))))
+              keys
+              (into #{})))
   Operational
-  (effect [c [k t v]] (join c (LwwElementSet. {k (LwwRegister. t v)}))))
+  (prepare [c o] o)
+  (effect [c [k t v]] (join c (LwwElementSet. {k (LwwRegister. t v)})))
+  Serializable
+  (marshal [_] (map-v marshal m)))
 
 (defmethod ->crdt :lww-element-set
   ([_] (LwwElementSet. {}))
-  ([_ m] (LwwElementSet. (vmap (partial ->crdt type) m))))
+  ([_ m] (LwwElementSet. (map-v (partial ->crdt :lww-register) m))))
 
 (def lww-element-set (partial ->crdt :lww-element-set))
 
-;; TODO: LWWElementSet ORSet ORMap OURSet OURMap
+#_
+(def a (lww-element-set {:a {:time 0 :value :add} :b {:time 0 :value :rem}}))
+#_
+(view (join a (lww-element-set {:c {:time 2 :value :add}})))
+#_
+(marshal a)
+
 
-;;; Unfinished
-;; (defrecord Element [^Boolean add      ;; Operation: true = add, false = remove
-;;                     ^Long timestamp]) ;; Epoch time (ms) of most recent update
+;; cRecord
+
+(deftype cRecord [schema values]
+  Convergent
+  (join [a b]
+    (if (and a b)
+      (->>
+          (for [{:keys [name logicaltype]} (:fields schema)
+                :let [[x y] (map #(-> % .-values (get name)) [a b])]]
+            [name (or (and x y (join x y)) x y)])
+        (into {})
+        (cRecord. schema))
+      (or a b)))
+  (view [c]
+    (->> (for [{:keys [name logicaltype]} (:fields schema)]
+           [name (some-> c .-values (get name) view)])
+      (into {})))
+  Operational
+  (prepare [c o] o)
+  (effect [c [k v]] (cRecord. schema (update values k effect v)))
+  Serializable
+  (crdt-type [_] :crecord)
+  (marshal [_] (map-v marshal values)))
+
+(defmethod ->crdt :crecord
+  ([_ schema] (cRecord. schema {}))
+  ([_ schema values]
+   (->> (for [{:keys [name logicaltype]} (:fields schema)]
+          [name (->> name (get values) (->crdt logicaltype))])
+     (filter #(-> % second some?))
+     (into {})
+     (cRecord. schema))))
+
+
+;; HOURMap - Homogeneous Observed Update Remove Map
+(deftype HOURMap [base m removed]
+  Convergent
+  (join [c c'] (HOURMap. base
+                        (merge-with join m (.-m c'))
+                        (union removed (.-removed c'))))
+  (view [c] (into {} (for [[k v] m
+                           :when (not (removed k))]
+                       [k (view v)])))
+  Operational
+  (prepare [c o] o)
+  (effect [c [cmd k v]]
+    (case cmd
+      :create
+      (join c (HOURMap. base {k v} removed))
+      :update
+      (join c (HOURMap. base {k (effect (get c k (->crdt base)) v)} removed))
+      :delete
+      (HOURMap. base m (conj removed k)))))
+
+  (defmethod ->crdt :hourmap
+    ([_ base] (HOURMap. base {} #{}))
+    ([_ base m] (HOURMap. base (map-v base m) #{})))
+
+  (def hourmap (partial ->crdt :hourmap))
+
+
+;; LwwMap
+
+(deftype LwwMap [m]
+  Convergent
+  (join [c c'] (LwwMap. (merge-with join m (.-m c'))))
+  (view [c] (->> m
+              (map-v view)
+              (filter (fn [[k v]] (not= ::rem v)))
+              (into {})))
+  Operational
+  (prepare [c o] o)
+  (effect [c [k t v]] (join c (LwwMap. {k (LwwRegister. t v)})))
+  Serializable
+  (marshal [_] (map-v marshal m)))
+
+(defmethod ->crdt :lww-map
+  ([_] (LwwMap. {}))
+  ([_ m] (LwwMap. (map-v (partial ->crdt :lww-register) m))))
+
+(def lww-map (partial ->crdt :lww-map))
+
+(defn lww-map-delete
+  "Remove an itm from a lww-map"
+  [c k time] (effect c [k time ::rem]))
+
+#_
+(def a (lww-map {:a {:time 0 :value :aaa} :b {:time 0 :value ::rem}}))
+#_
+(view (join a (lww-map {:c {:time 2 :value :ccc}})))
+#_
+(view (lww-map (marshal a)))
 
 
-;; (def reservation-schema
-;;   {:name "reservation"
-;;    :type :record
-;;    :fields [{:name :id, :type :string, :logicaltype :lww-register, :required true}
-;;             {:name :rid, :type :int, :logicaltype :lww-register, :required true}
-;;             {:name :partysize, :type :int, :logicaltype :lww-register, :required true}
-;;             ;; {:name "scheduled", :type :long, :logicaltype :timestamp-millis, :required true}
-;;             ;; {:name "state", :type :, :logicaltype :timestamp-millis, :required true}
-;;             {:name :diner-name, :type :string, :logicaltype :lww-register, :required true}
-;;             ]
-;;    })
+
+;; Or
+; Boolean Or type.
 
-;; (deftype cRecord [schema values]
-;;   Convergent
-;;   (join [a b]
-;;     (->>
-;;         (for [{:keys [name logicaltype]} (:fields schema)
-;;               :let [[x y] (map #(-> % .values (get name)) [a b])]]
-;;           [name (match [x y]
-;;                   [nil nil] nil
-;;                   [nil _] y
-;;                   [_ nil] x
-;;                   :else (join x y))])
-;;       (into {})
-;;       (cRecord. schema)))
-;;   (view [c]
-;;     (->> (for [{:keys [name logicaltype]} (:fields schema)]
-;;            [name (some-> c .values (get name) view)])
-;;       (into {}))))
+(deftype Or [v]
+  Convergent
+  (join [c c'] (Or. (or v (.-v c'))))
+  (view [c] v)
+  Operational
+  (prepare [c o] o)
+  (effect [c op] (join c (Or. op)))
+  Serializable
+  (crdt-type [_] :or)
+  (marshal [_] v))
 
-;; (defmethod ->crdt :crecord
-;;   ([_ schema] (cRecord. schema {}))
-;;   ([_ schema values]
-;;    (->> (for [{:keys [name logicaltype]} (:fields schema)]
-;;           [name (some->> name (get values) (->crdt logicaltype))])
-;;      (filter #(-> % second some?))
-;;      (into {})
-;;      (cRecord. schema))))
+(defmethod ->crdt :or
+  ([_] (Or. nil))
+  ([_ v] (Or. v)))
 
-;; (def a (->crdt :crecord reservation-schema
-;;               {:id {:value 5 :time 1}}))
+#_
+(view (fold :or [false false false])) ; => false
+#_
+(view (fold :or [false true false])) ; => true
 
-;; (def b (->crdt :crecord reservation-schema
-;;                {:rid {:value 123 :time 2}}))
-
-;; (view (join a b))
-
-;; (def ops
-;;   [
-;;    {:entry 0
-;;     :value {:id 1
-;;             :rid 1
-;;             :partysize 6}
-;;     :time 1}
-;;    {:entry 0
-;;     :value {:id 1
-;;             :rid 1
-;;             :partysize 6}
-;;     :time 1}
-;;    ])
