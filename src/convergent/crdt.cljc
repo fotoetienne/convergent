@@ -7,7 +7,7 @@
 
 ;;; Protocol
 
-(defprotocol CRDT
+(defprotocol Convergent
   "CRDT protocol.
 
   This protocol defines a Convergent Replicated Data Type
@@ -67,7 +67,7 @@
 ;;; GSet - Grow-Only Set
 
 (deftype GSet [s]
-  CRDT
+  Convergent
   (join [c c'] (GSet. (union s (.-s c'))))
   (view [c] s)
   Operational
@@ -90,7 +90,7 @@
 ;;; PNSet - Two Phase Set
 
 (deftype PNSet [pos neg]
-  CRDT
+  Convergent
   (join [c c']
     (PNSet. (join pos (.-pos c'))
            (join neg (.-neg c'))))
@@ -116,7 +116,7 @@
 
 
 (deftype GCounter [m]
-  CRDT
+  Convergent
   (join [c c'] (GCounter. (merge-with join m (.-m c'))))
   (view [c] (reduce + (vals m)))
   Operational
@@ -150,7 +150,7 @@
 
 
 (deftype PNCounter [pos neg]
-  CRDT
+  Convergent
   (join [c c']
     (PNCounter. (join pos (.-pos c')) (join neg (.-neg c'))))
   (view [c] (- (view pos) (view neg)))
@@ -184,7 +184,7 @@
 
 
 (deftype LwwRegister [time value]
-  CRDT
+  Convergent
   (join [c c'] (if (> time (.-time c')) c c'))
   (view [c] value)
   Operational
@@ -207,7 +207,7 @@
 ; Constant type.
 
 (deftype Const [v]
-  CRDT
+  Convergent
   (join [c c'] (Const. (or v (.-v c'))))
   (view [c] v)
   Operational
@@ -226,7 +226,7 @@
 ;; GMap - Grow-only map
 
 (deftype GMap [m]
-  CRDT
+  Convergent
   (join [c c'] (GSet. (merge-with join m (.-m c'))))
   (view [c] (vmap view m))
   Operational
@@ -245,7 +245,7 @@
 ;; LwwElementSet
 
 (deftype LwwElementSet [m]
-  CRDT
+  Convergent
   (join [c c'] (LwwElementSet. (join m (.-m c'))))
   (view [c] (into {} (filter (fn [k v] (view v)) m)))
   Operational
@@ -277,7 +277,7 @@
 ;;    })
 
 ;; (deftype cRecord [schema values]
-;;   CRDT
+;;   Convergent
 ;;   (join [a b]
 ;;     (->>
 ;;         (for [{:keys [name logicaltype]} (:fields schema)
