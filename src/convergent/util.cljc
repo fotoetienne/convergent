@@ -1,6 +1,6 @@
 (ns convergent.util)
 
-(defn vmap
+(defn map-v
   "Map f over values of a hashmap"
   [f coll]
   (into {} (for [[k v] coll] [k (f v)])))

@@ -1,7 +1,6 @@
 (ns convergent.crdt-test
   (:require [convergent.crdt :as c]
-            #?(:clj  [clojure.test :refer :all]
-               :cljs [cljs.test :refer-macros [deftest testing is]])))
+            [clojure.test :refer [deftest testing is]]))
 
 ;; TODO add generative tests for commutativity and idempotence
 
@@ -32,7 +31,7 @@
 (deftest gset-test
   (testing "fold over gset"
     (is (= #{1 2 3 4 5 6}
-         (c/view (c/fold :gset [1 2 2 3 4 5 6 1]))))))
+           (c/view (c/fold :gset [1 2 2 3 4 5 6 1]))))))
 
 (deftest pnset-test
   (testing "fold over pnset ops"

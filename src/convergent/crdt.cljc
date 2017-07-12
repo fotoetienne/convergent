@@ -1,7 +1,8 @@
 (ns convergent.crdt
   (:require
    [clojure.set :refer [union difference]]
-   [convergent.util :refer [vmap]]
+   [convergent.util :refer [map-v]]
+   [clojure.spec.alpha :as s]
    #?(:clj [clojure.core.reducers :as r])))
 
 
@@ -35,7 +36,7 @@
 
 (defmulti ->crdt
   "Create a crdt type from edn representation"
-  (fn [t & args] (keyword t)))
+  (fn [t & args] (keyword (name t))))
 
 
 ;;; Helper functions
@@ -51,12 +52,18 @@
   #?(:clj (r/fold (monoid crdt-type) effect coll)
      :cljs (reduce effect (->crdt crdt-type) coll)))
 
+;; NaN fails equality with itself and thus fails commutativity tests
+(defn nan? [x] (and (number? x) (not= x x)))
+(s/def ::any (s/and any? (complement nan?)))
+(s/def ::some (s/and ::any some?))
+(s/def ::number (s/and number? ::any))
+(s/def ::int (s/and int? ::any))
+
 
 ;;; # CRDT Types #
 
 
 ;;; GSet - Grow-Only Set
-
 (deftype GSet [s]
   Convergent
   (join [_ c'] (GSet. (union s (.-s c'))))
@@ -67,6 +74,9 @@
   Serializable
   (crdt-type [_] :gset)
   (marshal [_] (vec s)))
+
+(s/def ::gset (s/coll-of ::some))
+(s/def ::gset-op ::some)
 
 (defmethod ->crdt :gset
   ([_] (GSet. #{}))
@@ -100,6 +110,12 @@
   (crdt-type [c] :pnset)
   (marshal [c] [(marshal pos) (marshal neg)]))
 
+(s/def ::pos ::gset)
+(s/def ::neg ::gset)
+(s/def ::pnset (s/cat :pos ::pos :neg ::neg))
+(s/def ::pnset-op (s/cat :op #{:add :rem}
+                         :value ::gset-op))
+
 (defmethod ->crdt :pnset
   ([_] (PNSet. (gset) (gset)))
   ([_ [pos neg]] (PNSet. (gset pos) (gset neg))))
@@ -116,7 +132,7 @@
 
 (deftype GCounter [m]
   Convergent
-  (join [c c'] (GCounter. (merge-with join m (.-m c'))))
+  (join [c c'] (GCounter. (merge-with max m (.-m c'))))
   (view [c] (reduce + (vals m)))
   Operational
   (prepare [c [o node n]]
@@ -128,6 +144,12 @@
   Serializable
   (crdt-type [_] :gcounter)
   (marshal [_] m))
+
+(s/def :gcounter/node ::some)
+(s/def :gcounter/count pos-int?)
+(s/def ::gcounter (s/map-of :gcounter/node :gcounter/count))
+(s/def ::gcounter-op (s/cat :node :gcounter/node
+                            :count :gcounter/count))
 
 (defmethod ->crdt :gcounter
   ([_] (GCounter. {}))
@@ -166,6 +188,13 @@
       :p (PNCounter. (effect pos op') neg)
       :n (PNCounter. pos (effect neg op')))))
 
+(s/def ::p ::gcounter)
+(s/def ::n ::gcounter)
+(s/def ::pncounter (s/keys :req-un [::p ::n]))
+(s/def ::pncounter-op (s/cat :op #{:p :n}
+                             :node :gcounter/node
+                             :count :gcounter/count))
+
 (defmethod ->crdt :pncounter
   ([_] (PNCounter. (gcounter) (gcounter)))
   ([_ {:keys [p n]}] (PNCounter. (gcounter p) (gcounter n))))
@@ -188,7 +217,7 @@
 (deftype LwwRegister [time value]
   Convergent
   (join [c c']
-    (let [x (compare [time value] [(.-time c') (.-value c')])]
+    (let [x (compare [time (str value)] [(.-time c') (str (.-value c'))])]
       (if (>= x 0) c c')))
   (view [c] value)
   Operational
@@ -197,6 +226,13 @@
     (join c (LwwRegister. t v)))
   Serializable
   (marshal [c] {:time time :value value}))
+
+(s/def :lww-register/time int?)
+(s/def :lww-register/value ::any)
+(s/def ::lww-register
+  (s/keys :req-un [:lww-register/time :lww-register/value]))
+(s/def ::lww-register-op (s/cat :time :lww-register/time
+                                :value :lww-register/value))
 
 (defmethod ->crdt :lww-register
   ([_] (LwwRegister. 0 0))
@@ -224,6 +260,9 @@
   (crdt-type [_] :const)
   (marshal [_] v))
 
+(s/def ::const ::any)
+(s/def ::const-op ::any)
+
 (defmethod ->crdt :const
   ([_] (Const. nil))
   ([_ v] (Const. v)))
@@ -244,7 +283,10 @@
   (prepare [c o] o)
   ;; (effect [c [k v]] (join c (GMap. {k v})))
   (effect [c [k v]]
-    (join c (GMap. {k (if (get c k) (effect c v) v)}))))
+    (join c (GMap. {k (if (get c k) (effect (get c k) v) (effect (GMap. {}) v))}))))
+
+(s/def ::gmap (s/keys))
+(s/def ::gmap-op (s/cat :key ::some :value ::some))
 
 (defmethod ->crdt :gmap
   ([_] (GMap. {}))
@@ -361,6 +403,11 @@
   Serializable
   (marshal [_] (map-v marshal m)))
 
+(s/def ::lww-map (s/map-of ::some ::lww-register))
+(s/def ::lww-map-op (s/cat :key ::some
+                           :time :lww-register/time
+                           :value :lww-register/value))
+
 (defmethod ->crdt :lww-map
   ([_] (LwwMap. {}))
   ([_ m] (LwwMap. (map-v (partial ->crdt :lww-register) m))))
@@ -393,6 +440,9 @@
   Serializable
   (crdt-type [_] :or)
   (marshal [_] v))
+
+(s/def ::or boolean?)
+(s/def ::or-op boolean?)
 
 (defmethod ->crdt :or
   ([_] (Or. nil))
