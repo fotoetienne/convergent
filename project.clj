@@ -7,8 +7,6 @@
   :min-lein-version "2.5.2"
   :jvm-opts ["-Xmx1g"]
 
-  :dependencies [[org.clojure/core.match "0.3.0-alpha4"]]
-
   :profiles
   {:dev {:dependencies [[org.clojure/clojure "1.9.0-alpha17"]
                         [org.clojure/clojurescript "1.9.671"]
