@@ -10,21 +10,23 @@
   :dependencies [[org.clojure/core.match "0.3.0-alpha4"]]
 
   :profiles
-  {:dev {:dependencies [[org.clojure/clojure "1.9.0-alpha11"]
-                        [org.clojure/clojurescript "1.9.227"]
+  {:dev {:dependencies [[org.clojure/clojure "1.9.0-alpha17"]
+                        [org.clojure/clojurescript "1.9.671"]
                         [org.clojure/test.check "0.9.0"]
                         [org.mozilla/rhino "1.7.7.1"]]
-         :plugins [[lein-cljsbuild "1.1.3"]
-                   [lein-doo "0.1.6"]]}}
+         :plugins [[lein-cljsbuild "1.1.6"]
+                   [lein-doo "0.1.7"]]}}
 
   :aliases {"test-clj" ["test"]
-            "test-cljs" ["doo" "rhino" "test" "once"]
+            "test-cljs" ["doo" "once"]
             "test-all" ["do" "clean," "test-clj," "test-cljs"]
             "deploy" ["do" "clean," "deploy" "clojars"]}
 
   :jar-exclusions [#"\.swp|\.swo|\.DS_Store"]
 
-  :doo {:paths {:rhino "lein run -m org.mozilla.javascript.tools.shell.Main"}}
+  :doo {:build "test"
+        :paths {:rhino "lein run -m org.mozilla.javascript.tools.shell.Main"}
+        :alias {:default [:rhino]}}
 
   :cljsbuild {:builds
               {:test {:source-paths ["src" "test"]
